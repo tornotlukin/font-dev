@@ -1,5 +1,5 @@
 # build.py — SVG -> UFO -> OTF
-# Usage: python build.py
+# Usage: python build.py [FAMILY] [STYLE]
 import os, re, sys, subprocess
 from pathlib import Path
 from ufoLib2 import Font
@@ -10,8 +10,10 @@ from svgpathtools import svg2paths2, Path as SvgPath, Line, QuadraticBezier, Cub
 PROJECT = Path(__file__).resolve().parent
 SVG_DIR = PROJECT / "svgs"
 OUT_DIR = PROJECT / "out"
-FAMILY = "DilloHand"
-STYLE = "Regular"
+
+# Default values (can be overridden by command-line arguments)
+DEFAULT_FAMILY = "DilloHand"
+DEFAULT_STYLE = "Regular"
 
 # ==== Metrics (1000 UPM grid) ====
 UPM = 1000
@@ -136,10 +138,10 @@ def production_name_from_cp(cp: int):
         return f"uni{cp:04X}"
     return f"u{cp:05X}"
 
-def build_ufo():
+def build_ufo(family_name, style_name):
     u = Font()
-    u.info.familyName = FAMILY
-    u.info.styleName = STYLE
+    u.info.familyName = family_name
+    u.info.styleName = style_name
     u.info.unitsPerEm = UPM
     u.info.ascender = ASCENDER
     u.info.descender = DESCENDER
@@ -177,7 +179,7 @@ def build_ufo():
     # Persist preferred order
     u.lib["public.glyphOrder"] = glyph_order
 
-    ufo_path = PROJECT / f"{FAMILY}-{STYLE}.ufo"
+    ufo_path = PROJECT / f"{family_name}-{style_name}.ufo"
     u.save(ufo_path, overwrite=True)
     return ufo_path
 
@@ -187,8 +189,21 @@ def compile_otf(ufo_path: Path):
     subprocess.check_call(cmd)
 
 def main():
+    # Parse command-line arguments
+    if len(sys.argv) >= 3:
+        family_name = sys.argv[1]
+        style_name = sys.argv[2]
+    elif len(sys.argv) == 2:
+        family_name = sys.argv[1]
+        style_name = DEFAULT_STYLE
+    else:
+        family_name = DEFAULT_FAMILY
+        style_name = DEFAULT_STYLE
+    
+    print(f"Building font: {family_name} {style_name}")
+    
     ensure_dirs()
-    ufo_path = build_ufo()
+    ufo_path = build_ufo(family_name, style_name)
     compile_otf(ufo_path)
     print("Done. Check 'out' folder.")
 
