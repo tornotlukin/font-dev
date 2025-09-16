@@ -32,6 +32,7 @@ SVG_Y_IS_DOWN = True
 DEFAULT_ADV = 1000
 
 HEX_RE = re.compile(r"^[0-9A-Fa-f]{4,6}$")
+UNICODE_RE = re.compile(r"^U\+([0-9A-Fa-f]{4,6})$")
 
 def ensure_dirs():
     OUT_DIR.mkdir(exist_ok=True)
@@ -125,6 +126,11 @@ def load_svg_to_glyph(svg_pathfile, glyph):
 
 def codepoint_from_name(name: str):
     base = name.split('.')[0]
+    # Check for Unicode format: U+0043
+    unicode_match = UNICODE_RE.match(base)
+    if unicode_match:
+        return int(unicode_match.group(1), 16)
+    # Check for plain hex: 0043
     if HEX_RE.match(base):
         return int(base, 16)
     # Allow simple ASCII names like A, a, zero, etc., if desired:
