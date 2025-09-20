@@ -181,6 +181,106 @@ def analyze_all_svgs_for_metrics(config, auto_sidebearing=False):
     
     return calculated_metrics
 
+def generate_opentype_features(config, font_glyphs):
+    """Generate OpenType feature code for alternates that actually exist in the font."""
+    features = []
+    alternates_config = config.get("alternates", {})
+    
+    # Generate Stylistic Sets (ss01, ss02, etc.)
+    stylistic_sets = alternates_config.get("stylisticSets", {})
+    for set_tag, set_info in stylistic_sets.items():
+        # Only include substitutions where both base and alternate glyphs exist
+        valid_substitutions = []
+        for base_glyph, alt_glyph in set_info.get("substitutions", {}).items():
+            if base_glyph in font_glyphs and alt_glyph in font_glyphs:
+                valid_substitutions.append((base_glyph, alt_glyph))
+        
+        if valid_substitutions:  # Only create feature if we have valid substitutions
+            feature_code = f"""
+feature {set_tag} {{
+    # {set_info.get('name', set_tag)}
+    # {set_info.get('description', '')}
+"""
+            for base_glyph, alt_glyph in valid_substitutions:
+                feature_code += f"    sub {base_glyph} by {alt_glyph};\n"
+            
+            feature_code += "} " + set_tag + ";\n"
+            features.append(feature_code)
+    
+    # Generate Character Variants (cv01, cv02, etc.)
+    char_variants = alternates_config.get("characterVariants", {})
+    for cv_tag, cv_info in char_variants.items():
+        # Only include substitutions where both base and alternate glyphs exist
+        valid_substitutions = []
+        for base_glyph, alt_glyph in cv_info.get("substitutions", {}).items():
+            if base_glyph in font_glyphs and alt_glyph in font_glyphs:
+                valid_substitutions.append((base_glyph, alt_glyph))
+        
+        if valid_substitutions:  # Only create feature if we have valid substitutions
+            feature_code = f"""
+feature {cv_tag} {{
+    # {cv_info.get('name', cv_tag)}
+    # {cv_info.get('description', '')}
+"""
+            for base_glyph, alt_glyph in valid_substitutions:
+                feature_code += f"    sub {base_glyph} by {alt_glyph};\n"
+            
+            feature_code += "} " + cv_tag + ";\n"
+            features.append(feature_code)
+    
+    return "\n".join(features)
+
+def detect_alternate_glyphs(svg_dir):
+    """Detect alternate glyph files like U+0061-ss01.svg or uni0061-ss01.svg."""
+    alternates = {}
+    
+    for svg_file in svg_dir.glob("*.svg"):
+        name = svg_file.stem
+        
+        # Check for stylistic set alternates (e.g., U+0061-ss01 or uni0061-ss01)
+        if "-ss" in name:
+            parts = name.split("-ss")
+            if len(parts) == 2:
+                base_name = parts[0]
+                set_number = parts[1]
+                if set_number.isdigit():
+                    # Convert U+ format to uni format for glyph name
+                    if base_name.startswith("U+"):
+                        uni_base = f"uni{base_name[2:].upper().zfill(4)}"
+                    else:
+                        uni_base = base_name
+                    
+                    alt_glyph = f"{uni_base}.ss{set_number.zfill(2)}"
+                    alternates[alt_glyph] = {
+                        'file': svg_file,
+                        'base': base_name,
+                        'type': 'stylistic_set',
+                        'number': set_number
+                    }
+        
+        # Check for character variants (e.g., U+0061-cv01 or uni0061-cv01)
+        elif "-cv" in name:
+            parts = name.split("-cv")
+            if len(parts) == 2:
+                base_name = parts[0]
+                cv_number = parts[1]
+                if cv_number.isdigit():
+                    # Convert U+ format to uni format for glyph name
+                    if base_name.startswith("U+"):
+                        uni_base = f"uni{base_name[2:].upper().zfill(4)}"
+                    else:
+                        uni_base = base_name
+                        
+                    alt_glyph = f"{uni_base}.cv{cv_number.zfill(2)}"
+                    alternates[alt_glyph] = {
+                        'file': svg_file,
+                        'base': base_name,
+                        'type': 'character_variant',
+                        'number': cv_number
+                    }
+    
+    return alternates
+
 def ensure_dirs():
     OUT_DIR.mkdir(exist_ok=True)
     SVG_DIR.mkdir(exist_ok=True)
@@ -326,10 +426,32 @@ def build_ufo(family_name, style_name, auto_sidebearing=False):
 
     glyph_order = [".notdef"]
 
-    # Import SVG glyphs first
+    # Detect alternate glyphs
+    alternates = detect_alternate_glyphs(SVG_DIR)
+    if alternates:
+        print(f"Found {len(alternates)} alternate glyphs:")
+        for alt_name, alt_info in alternates.items():
+            print(f"  {alt_name} -> {alt_info['file'].name}")
+
+    # Import SVG glyphs - separate regular glyphs from alternates
     has_space = False
-    for svg_file in sorted(SVG_DIR.glob("*.svg")):
+    all_svg_files = list(SVG_DIR.glob("*.svg"))
+    
+    # Get list of alternate files to skip in regular processing
+    alternate_files = set()
+    for alt_info in alternates.values():
+        alternate_files.add(alt_info['file'].stem)
+    
+    # Process regular glyphs first
+    processed_regulars = set()
+    for svg_file in sorted(all_svg_files):
         stem = svg_file.stem
+        
+        # Skip alternate glyph files - they'll be processed separately
+        if stem in alternate_files:
+            continue
+            
+        # Handle regular glyphs only
         cp = codepoint_from_name(stem)
         if cp is None:
             print(f"Skipping {svg_file.name}: cannot infer Unicode from filename")
@@ -342,10 +464,82 @@ def build_ufo(family_name, style_name, auto_sidebearing=False):
         else:
             gname = production_name_from_cp(cp)
         
-        g = u.newGlyph(gname) if gname not in u else u[gname]
-        g.unicodes = [cp]
+        print(f"Processing regular glyph: {gname} (U+{cp:04X})")
+        
+        # Check if we've already processed this glyph name
+        if gname in processed_regulars:
+            print(f"Warning: Regular glyph {gname} already processed, skipping {svg_file.name}")
+            continue
+            
+        # Always create a new glyph (don't reuse existing ones)
+        if gname in u:
+            print(f"Warning: Glyph {gname} already exists in UFO, skipping {svg_file.name}")
+            continue
+            
+        g = u.newGlyph(gname)
+        processed_regulars.add(gname)
+        if cp is not None:  # Regular glyphs get Unicode assignments
+            g.unicodes = [cp]
+        # Alternate glyphs don't get Unicode assignments
         
         # Determine metrics and offset for this glyph
+        offset_x = 0
+        final_width = config["font"]["defaultAdvanceWidth"]
+        
+        # Priority 1: Manual metrics from config
+        if gname in metrics_config:
+            metrics = metrics_config[gname]
+            final_width = metrics.get("width", config["font"]["defaultAdvanceWidth"])
+            
+            # Calculate offset for manual metrics if needed
+            if "leftMargin" in metrics:
+                bbox = get_svg_bbox(svg_file)
+                if bbox:
+                    svg_left = bbox[0]
+                    desired_left = metrics["leftMargin"]
+                    offset_x = desired_left - svg_left
+        
+        # Priority 2: Auto-calculated metrics (if enabled and not manually configured)
+        elif auto_sidebearing and gname in calculated_metrics:
+            auto_metrics = calculated_metrics[gname]
+            final_width = auto_metrics['width']
+            offset_x = auto_metrics['offsetX']
+        
+        # Load SVG content with proper positioning
+        load_svg_to_glyph(svg_file, g, offset_x)
+        g.width = final_width
+        
+        if auto_sidebearing and gname in calculated_metrics:
+            print(f"Applied auto-metrics for {gname}: width={final_width}, offset={offset_x:.1f}")
+        elif gname in metrics_config:
+            print(f"Applied manual metrics for {gname}: width={final_width}, offset={offset_x:.1f}")
+        
+        if gname not in glyph_order:
+            glyph_order.append(gname)
+
+    # Process alternate glyphs separately
+    processed_alternates = set()
+    for alt_name, alt_info in alternates.items():
+        svg_file = alt_info['file']
+        gname = alt_name  # e.g., uni0061.ss01
+        
+        print(f"Processing alternate glyph: {gname} (variant of {alt_info['base']})")
+        
+        # Check if we've already processed this alternate name
+        if gname in processed_alternates:
+            print(f"Warning: Alternate glyph {gname} already processed, skipping {svg_file.name}")
+            continue
+            
+        # Always create a new glyph (don't reuse existing ones)
+        if gname in u:
+            print(f"Warning: Glyph {gname} already exists in UFO, skipping {svg_file.name}")
+            continue
+            
+        g = u.newGlyph(gname)
+        processed_alternates.add(gname)
+        # Alternates don't get Unicode assignments
+        
+        # Determine metrics and offset for this alternate glyph
         offset_x = 0
         final_width = config["font"]["defaultAdvanceWidth"]
         
@@ -395,6 +589,15 @@ def build_ufo(family_name, style_name, auto_sidebearing=False):
                     if right_glyph in u:
                         u.kerning[(left_glyph, right_glyph)] = kern_value
                         print(f"Applied kerning: {left_glyph} + {right_glyph} = {kern_value}")
+
+    # Generate OpenType features for alternates (only for glyphs that exist)
+    font_glyph_names = set(u.keys())
+    feature_code = generate_opentype_features(config, font_glyph_names)
+    if feature_code.strip():
+        u.features.text = feature_code
+        print("Generated OpenType features for alternates")
+    else:
+        print("No valid alternate glyphs found for OpenType features")
 
     # Persist preferred order
     u.lib["public.glyphOrder"] = glyph_order
