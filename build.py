@@ -158,29 +158,37 @@ def build_ufo(family_name, style_name):
     g = u.newGlyph(".notdef")
     g.width = DEFAULT_ADV
 
-    # Space (U+0020) if an SVG named 0020.svg is not provided
-    # We still set width so spacing is OK.
-    if not (SVG_DIR / "0020.svg").exists():
-        sp = u.newGlyph("space")
-        sp.unicodes = [0x0020]
-        sp.width = DEFAULT_ADV
+    glyph_order = [".notdef"]
 
-    glyph_order = [".notdef", "space"]
-
-    # Import SVG glyphs
+    # Import SVG glyphs first
+    has_space = False
     for svg_file in sorted(SVG_DIR.glob("*.svg")):
         stem = svg_file.stem
         cp = codepoint_from_name(stem)
         if cp is None:
             print(f"Skipping {svg_file.name}: cannot infer Unicode from filename")
             continue
-        gname = production_name_from_cp(cp)
+        
+        # Check if this is the space character
+        if cp == 0x0020:
+            has_space = True
+            gname = "space"  # Use "space" instead of "uni0020" for better compatibility
+        else:
+            gname = production_name_from_cp(cp)
+        
         g = u.newGlyph(gname) if gname not in u else u[gname]
         g.width = DEFAULT_ADV
         g.unicodes = [cp]
         load_svg_to_glyph(svg_file, g)
         if gname not in glyph_order:
             glyph_order.append(gname)
+
+    # Only create fallback space if no 0020.svg exists
+    if not has_space:
+        sp = u.newGlyph("space")
+        sp.unicodes = [0x0020]
+        sp.width = DEFAULT_ADV
+        glyph_order.append("space")
 
     # Persist preferred order
     u.lib["public.glyphOrder"] = glyph_order

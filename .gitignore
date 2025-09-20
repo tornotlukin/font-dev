@@ -9,6 +9,11 @@ venv/
 env/
 ENV/
 
+# font stuff
+out/
+raw/
+svgs/
+
 # Distribution / packaging
 build/
 dist/
