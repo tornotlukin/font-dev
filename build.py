@@ -1,38 +1,185 @@
 # build.py — SVG -> UFO -> OTF
-# Usage: python build.py [FAMILY] [STYLE]
-import os, re, sys, subprocess
+# Usage: python build.py [auto] [FAMILY] [STYLE]
+# Use 'auto' as first argument to enable automatic sidebearing calculation
+import os, re, sys, subprocess, json
 from pathlib import Path
 from ufoLib2 import Font
 from fontTools.pens.transformPen import TransformPen
 from fontTools.misc.transform import Identity
 from svgpathtools import svg2paths2, Path as SvgPath, Line, QuadraticBezier, CubicBezier, Arc
+import xml.etree.ElementTree as ET
 
 PROJECT = Path(__file__).resolve().parent
 SVG_DIR = PROJECT / "svgs"
 OUT_DIR = PROJECT / "out"
 
-# Default values (can be overridden by command-line arguments)
-DEFAULT_FAMILY = "DilloHand"
-DEFAULT_STYLE = "Regular"
-
-# ==== Metrics (1000 UPM grid) ====
-UPM = 1000
-BASELINE_SVG_Y = 200  # baseline measured from top of the 1000x1000 SVG
-ASCENDER = 800
-DESCENDER = -200
-XHEIGHT = 500
-CAPHEIGHT = 750
-
-# If your SVGs appear upside-down in the test OTF, set this to False.
-# True means: y_font = (1000 - y_svg) - 800 == 200 - y_svg  (flip + offset)
-# False means: y_font = y_svg - 200                         (no flip, just shift)
-SVG_Y_IS_DOWN = True
-
-# Default advance width (can be adjusted per glyph if you like)
-DEFAULT_ADV = 1000
+# Global configuration loaded from JSON
+CONFIG = None
 
 HEX_RE = re.compile(r"^[0-9A-Fa-f]{4,6}$")
 UNICODE_RE = re.compile(r"^U\+([0-9A-Fa-f]{4,6})$")
+
+def load_config():
+    """Load the main configuration from font-config.json"""
+    global CONFIG
+    if CONFIG is None:
+        config_file = PROJECT / "font-config.json"
+        if config_file.exists():
+            with open(config_file, 'r') as f:
+                CONFIG = json.load(f)
+        else:
+            # Fallback defaults if no config file
+            CONFIG = {
+                "font": {
+                    "familyName": "DilloHand",
+                    "styleName": "Regular",
+                    "unitsPerEm": 1000,
+                    "ascender": 800,
+                    "descender": -200,
+                    "xHeight": 500,
+                    "capHeight": 750,
+                    "defaultAdvanceWidth": 1000
+                },
+                "build": {
+                    "svgYIsDown": True,
+                    "baselineSvgY": 200,
+                    "autoSidebearingMargin": 10,
+                    "enableAutoSidebearings": True
+                },
+                "glyphMetrics": {},
+                "kerning": {}
+            }
+    return CONFIG
+
+
+
+def get_svg_bbox(svg_file):
+    """Extract bounding box from SVG file to calculate sidebearings."""
+    try:
+        # First try with svgpathtools for path-based content
+        paths, attrs, svg_attrs = svg2paths2(str(svg_file))
+        
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
+        
+        # Process paths from svgpathtools
+        for path in paths:
+            if path:
+                bbox = path.bbox()
+                if bbox and len(bbox) >= 4:
+                    min_x = min(min_x, bbox[0])
+                    max_x = max(max_x, bbox[1]) 
+                    min_y = min(min_y, bbox[2])
+                    max_y = max(max_y, bbox[3])
+        
+        # If no paths found, try parsing XML elements directly
+        if min_x == float('inf'):
+            tree = ET.parse(str(svg_file))
+            root = tree.getroot()
+            
+            # Look for common SVG elements with position info
+            for elem in root.iter():
+                tag = elem.tag.split('}')[-1]  # Remove namespace
+                
+                if tag in ['rect', 'circle', 'ellipse', 'line']:
+                    # Get bounding box from basic shapes
+                    x = float(elem.get('x', 0))
+                    y = float(elem.get('y', 0))
+                    w = float(elem.get('width', 0))
+                    h = float(elem.get('height', 0))
+                    
+                    if tag == 'circle':
+                        cx = float(elem.get('cx', 0))
+                        cy = float(elem.get('cy', 0))
+                        r = float(elem.get('r', 0))
+                        x, y, w, h = cx - r, cy - r, r * 2, r * 2
+                    elif tag == 'ellipse':
+                        cx = float(elem.get('cx', 0))
+                        cy = float(elem.get('cy', 0))
+                        rx = float(elem.get('rx', 0))
+                        ry = float(elem.get('ry', 0))
+                        x, y, w, h = cx - rx, cy - ry, rx * 2, ry * 2
+                    
+                    if w > 0 and h > 0:
+                        min_x = min(min_x, x)
+                        max_x = max(max_x, x + w)
+                        min_y = min(min_y, y)
+                        max_y = max(max_y, y + h)
+        
+        if min_x == float('inf'):
+            return None
+            
+        return (min_x, min_y, max_x, max_y)
+    except Exception as e:
+        print(f"Warning: Could not parse SVG {svg_file.name}: {e}")
+        return None
+
+def calculate_auto_sidebearings(bbox, config, margin_units=5):
+    """Calculate sidebearings with specified margin from glyph edges."""
+    if not bbox:
+        return None
+        
+    min_x, min_y, max_x, max_y = bbox
+    
+    # The actual glyph width (visual content)
+    glyph_width = max_x - min_x
+    
+    # Add specified margins on each side
+    left_margin = margin_units
+    right_margin = margin_units
+    
+    # Total advance width = left margin + glyph width + right margin
+    total_width = int(left_margin + glyph_width + right_margin)
+    
+    return {
+        'width': total_width,
+        'leftMargin': int(left_margin),
+        'rightMargin': int(right_margin),
+        'glyphWidth': int(glyph_width),
+        'glyphBounds': (min_x, max_x),
+        'svgMinX': min_x,  # Original SVG left edge
+        'offsetX': left_margin - min_x  # How much to move glyph to achieve left margin
+    }
+
+def analyze_all_svgs_for_metrics(config, auto_sidebearing=False):
+    """Pre-analyze all SVG files and calculate proper metrics before font creation."""
+    calculated_metrics = {}
+    margin = config["build"].get("autoSidebearingMargin", 5)
+    
+    print("Analyzing SVG files for automatic sidebearing calculation...")
+    
+    for svg_file in sorted(SVG_DIR.glob("*.svg")):
+        stem = svg_file.stem
+        cp = codepoint_from_name(stem)
+        if cp is None:
+            print(f"Skipping {svg_file.name}: cannot infer Unicode from filename")
+            continue
+            
+        # Check if this is the space character
+        if cp == 0x0020:
+            gname = "space"
+        else:
+            gname = production_name_from_cp(cp)
+            
+        if auto_sidebearing:
+            bbox = get_svg_bbox(svg_file)
+            auto_metrics = calculate_auto_sidebearings(bbox, config, margin)
+            
+            if auto_metrics:
+                calculated_metrics[gname] = {
+                    'width': auto_metrics['width'],
+                    'leftMargin': auto_metrics['leftMargin'],
+                    'rightMargin': auto_metrics['rightMargin'],
+                    'offsetX': auto_metrics['offsetX'],
+                    'originalBounds': auto_metrics['glyphBounds']
+                }
+                print(f"Calculated metrics for {gname}: width={auto_metrics['width']}, "
+                      f"left={auto_metrics['leftMargin']}, right={auto_metrics['rightMargin']}, "
+                      f"offset={auto_metrics['offsetX']:.1f}")
+            else:
+                print(f"Warning: Could not calculate metrics for {gname}")
+    
+    return calculated_metrics
 
 def ensure_dirs():
     OUT_DIR.mkdir(exist_ok=True)
@@ -40,12 +187,13 @@ def ensure_dirs():
 
 def svg_point_to_font(pt):
     """pt is complex (x + y*i) from svgpathtools."""
+    config = load_config()
     x = pt.real
     y = pt.imag
-    if SVG_Y_IS_DOWN:
-        y_new = (UPM - y) - BASELINE_SVG_Y  # flip + shift so baseline lands at y=0
+    if config["build"]["svgYIsDown"]:
+        y_new = (config["font"]["unitsPerEm"] - y) - config["build"]["baselineSvgY"]  # flip + shift so baseline lands at y=0
     else:
-        y_new = y - BASELINE_SVG_Y  # just shift
+        y_new = y - config["build"]["baselineSvgY"]  # just shift
     return (float(x), float(y_new))
 
 
@@ -115,10 +263,17 @@ def draw_svg_path_into_pen(svg_path, pen):
         else:
             pen.endPath()
 
-def load_svg_to_glyph(svg_pathfile, glyph):
-    """Parse an SVG and draw all <path> elements into the UFO glyph."""
+def load_svg_to_glyph(svg_pathfile, glyph, offset_x=0):
+    """Parse an SVG and draw all <path> elements into the UFO glyph with optional horizontal offset."""
     paths, attrs, svg_attrs = svg2paths2(str(svg_pathfile))
     pen = glyph.getPen()
+    
+    # Apply transform if offset is needed
+    if offset_x != 0:
+        from fontTools.misc.transform import Transform
+        transform_pen = TransformPen(pen, Transform(1, 0, 0, 1, offset_x, 0))
+        pen = transform_pen
+    
     for p in paths:
         if len(p) == 0:
             continue
@@ -144,19 +299,30 @@ def production_name_from_cp(cp: int):
         return f"uni{cp:04X}"
     return f"u{cp:05X}"
 
-def build_ufo(family_name, style_name):
+def build_ufo(family_name, style_name, auto_sidebearing=False):
+    config = load_config()
+    
+    # Pre-analyze all SVGs for metrics if auto-sidebearing is enabled
+    calculated_metrics = {}
+    if auto_sidebearing:
+        calculated_metrics = analyze_all_svgs_for_metrics(config, auto_sidebearing)
+    
     u = Font()
     u.info.familyName = family_name
     u.info.styleName = style_name
-    u.info.unitsPerEm = UPM
-    u.info.ascender = ASCENDER
-    u.info.descender = DESCENDER
-    u.info.xHeight = XHEIGHT
-    u.info.capHeight = CAPHEIGHT
+    u.info.unitsPerEm = config["font"]["unitsPerEm"]
+    u.info.ascender = config["font"]["ascender"]
+    u.info.descender = config["font"]["descender"]
+    u.info.xHeight = config["font"]["xHeight"]
+    u.info.capHeight = config["font"]["capHeight"]
+
+    # Load configuration sections
+    metrics_config = config.get("glyphMetrics", {})
+    kerning_config = config.get("kerning", {})
 
     # .notdef (required)
     g = u.newGlyph(".notdef")
-    g.width = DEFAULT_ADV
+    g.width = config["font"]["defaultAdvanceWidth"]
 
     glyph_order = [".notdef"]
 
@@ -177,9 +343,40 @@ def build_ufo(family_name, style_name):
             gname = production_name_from_cp(cp)
         
         g = u.newGlyph(gname) if gname not in u else u[gname]
-        g.width = DEFAULT_ADV
         g.unicodes = [cp]
-        load_svg_to_glyph(svg_file, g)
+        
+        # Determine metrics and offset for this glyph
+        offset_x = 0
+        final_width = config["font"]["defaultAdvanceWidth"]
+        
+        # Priority 1: Manual metrics from config
+        if gname in metrics_config:
+            metrics = metrics_config[gname]
+            final_width = metrics.get("width", config["font"]["defaultAdvanceWidth"])
+            
+            # Calculate offset for manual metrics if needed
+            if "leftMargin" in metrics:
+                bbox = get_svg_bbox(svg_file)
+                if bbox:
+                    svg_left = bbox[0]
+                    desired_left = metrics["leftMargin"]
+                    offset_x = desired_left - svg_left
+        
+        # Priority 2: Auto-calculated metrics (if enabled and not manually configured)
+        elif auto_sidebearing and gname in calculated_metrics:
+            auto_metrics = calculated_metrics[gname]
+            final_width = auto_metrics['width']
+            offset_x = auto_metrics['offsetX']
+        
+        # Load SVG content with proper positioning
+        load_svg_to_glyph(svg_file, g, offset_x)
+        g.width = final_width
+        
+        if auto_sidebearing and gname in calculated_metrics:
+            print(f"Applied auto-metrics for {gname}: width={final_width}, offset={offset_x:.1f}")
+        elif gname in metrics_config:
+            print(f"Applied manual metrics for {gname}: width={final_width}, offset={offset_x:.1f}")
+        
         if gname not in glyph_order:
             glyph_order.append(gname)
 
@@ -187,8 +384,17 @@ def build_ufo(family_name, style_name):
     if not has_space:
         sp = u.newGlyph("space")
         sp.unicodes = [0x0020]
-        sp.width = DEFAULT_ADV
+        sp.width = config["font"]["defaultAdvanceWidth"]
         glyph_order.append("space")
+
+    # Apply kerning pairs
+    if kerning_config:
+        for left_glyph, right_dict in kerning_config.items():
+            if left_glyph in u:
+                for right_glyph, kern_value in right_dict.items():
+                    if right_glyph in u:
+                        u.kerning[(left_glyph, right_glyph)] = kern_value
+                        print(f"Applied kerning: {left_glyph} + {right_glyph} = {kern_value}")
 
     # Persist preferred order
     u.lib["public.glyphOrder"] = glyph_order
@@ -203,21 +409,53 @@ def compile_otf(ufo_path: Path):
     subprocess.check_call(cmd)
 
 def main():
-    # Parse command-line arguments
-    if len(sys.argv) >= 3:
-        family_name = sys.argv[1]
-        style_name = sys.argv[2]
-    elif len(sys.argv) == 2:
-        family_name = sys.argv[1]
-        style_name = DEFAULT_STYLE
+    config = load_config()
+    
+    # Check for help request
+    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help', 'help']:
+        print("Usage: python build.py [auto] [FAMILY] [STYLE]")
+        print("")
+        print("Arguments:")
+        print("  auto      Enable automatic sidebearing calculation from SVG bounds")
+        print("  FAMILY    Font family name (default from config)")
+        print("  STYLE     Font style name (default from config)")
+        print("")
+        print("Examples:")
+        print("  python build.py")
+        print("  python build.py auto")
+        print("  python build.py DilloHand")
+        print("  python build.py auto DilloHand Bold")
+        return
+    
+    # Parse command-line arguments with auto-sidebearing control
+    auto_sidebearing = False
+    args = sys.argv[1:]  # Remove script name
+    
+    # Check if 'auto' is the first argument
+    if len(args) > 0 and args[0].lower() == "auto":
+        auto_sidebearing = True
+        args = args[1:]  # Remove 'auto' from arguments
+        print("Auto-sidebearing: ENABLED via command line")
+    
+    # Parse remaining arguments for family and style
+    if len(args) >= 2:
+        family_name = args[0]
+        style_name = args[1]
+    elif len(args) == 1:
+        family_name = args[0]
+        style_name = config["font"]["styleName"]  # Use config default for style
     else:
-        family_name = DEFAULT_FAMILY
-        style_name = DEFAULT_STYLE
+        family_name = config["font"]["familyName"]  # Use config defaults
+        style_name = config["font"]["styleName"]
     
     print(f"Building font: {family_name} {style_name}")
+    if auto_sidebearing:
+        print("Auto-sidebearing: ENABLED")
+    else:
+        print("Auto-sidebearing: DISABLED")
     
     ensure_dirs()
-    ufo_path = build_ufo(family_name, style_name)
+    ufo_path = build_ufo(family_name, style_name, auto_sidebearing)
     compile_otf(ufo_path)
     print("Done. Check 'out' folder.")
 
