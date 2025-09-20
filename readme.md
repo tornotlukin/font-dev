@@ -76,31 +76,17 @@ All font settings are controlled through `font-config.json`:
 }
 ```
 
-### Stylistic Alternates
+### Stylistic Alternates ✨ FULLY AUTOMATIC
 ```json
 {
-  "alternates": {
-    "stylisticSets": {
-      "ss01": {
-        "name": "Alternate lowercase a",
-        "description": "Lowercase 'a' without crossbar",
-        "substitutions": {
-          "uni0061": "uni0061.ss01"
-        }
-      }
-    },
-    "characterVariants": {
-      "cv01": {
-        "name": "Alternate g", 
-        "description": "Single-story g variant",
-        "substitutions": {
-          "uni0067": "uni0067.cv01"
-        }
-      }
-    }
+  "_alternates_automatic": {
+    "_comment": "Alternates are now auto-generated from SVG filenames",
+    "_usage": "Just create files like U+0061-ss01.svg or U+0067-cv01.svg"
   }
 }
 ```
+
+No manual configuration needed! OpenType features are generated automatically based on your SVG filenames.
 
 ### Kerning Pairs
 ```json
@@ -189,8 +175,9 @@ svgs/
 ### Stylistic Alternates & Character Variants ✨ NEW
 Create multiple versions of letters that users can access in design programs through OpenType features:
 
-- **Stylistic Sets (ss01-ss20)** - Thematic alternate styles (e.g., all letters without crossbars)
-- **Character Variants (cv01-cv99)** - Individual character alternates (e.g., single-story 'g')
+- **Stylistic Sets (ss01-ss20)** - Thematic alternate styles (e.g., all letters without crossbars as a design theme)
+- **Character Variants (cv01-cv99)** - Individual character alternates (e.g., single-story 'g', alternate 'a' forms)
+- **Stylistic Alternates (salt)** - General access feature that includes ALL alternates (auto-generated)
 
 The build system automatically detects alternate glyph files and generates the necessary OpenType features.
 
@@ -199,18 +186,54 @@ The build system automatically detects alternate glyph files and generates the n
 - `U+0067-cv01.svg` - Character Variant 01 version of 'g' → creates `uni0067.cv01` glyph  
 - `U+0052-ss02.svg` - Stylistic Set 02 version of 'R' → creates `uni0052.ss02` glyph
 
-#### Automatic Processing
+#### Fully Automatic Processing ✨ NEW
 1. **Detection** - Build system scans for `-ss##` and `-cv##` patterns in SVG filenames
-2. **Glyph Creation** - Creates separate alternate glyphs (no Unicode assignments)
-3. **Feature Generation** - Automatically generates OpenType substitution rules
-4. **Duplicate Protection** - Prevents alternate glyphs from overwriting regular glyphs
+2. **Glyph Creation** - Creates separate alternate glyphs (no Unicode assignments)  
+3. **Feature Generation** - **Automatically generates OpenType features** based on detected files
+4. **No Manual Config** - No need to edit JSON for alternates - just create the SVG files!
+5. **Duplicate Protection** - Prevents alternate glyphs from overwriting regular glyphs
+
+**Example Workflow:**
+```bash
+# 1. Create your SVG files
+svgs/U+0061.svg        # Regular 'a'
+svgs/U+0061-ss01.svg   # Stylistic Set 1 'a'
+svgs/U+0021-cv01.svg   # Character Variant 1 '!' (first alternate)
+svgs/U+0021-cv02.svg   # Character Variant 2 '!' (second alternate)
+
+# 2. Run build (that's it!)
+python build.py auto
+
+# 3. OpenType features are auto-generated with proper syntax:
+# feature ss01 { sub uni0061 by uni0061.ss01; }
+# feature cv01 { sub uni0021 from [uni0021.cv01 uni0021.cv02]; }  # Multiple alternates!
+# feature salt { sub uni0061 by uni0061.ss01; sub uni0021 from [uni0021.cv01 uni0021.cv02]; }
+# feature aalt { feature salt; feature ss01; feature cv01; }
+```
+
+**🎯 Multiple Alternates Support:**
+- **Same feature, same base**: `U+0021-cv01.svg` + `U+0021-cv02.svg` → `cv01` feature with choice UI
+- **Proper OpenType syntax**: Uses alternate substitution `from [...]` for multiple choices
+- **App compatibility**: Works correctly in Illustrator, InDesign, Figma, etc.
 
 #### Access in Design Programs
-- **Adobe InDesign** - OpenType panel → Stylistic Sets / Character Variants
-- **Adobe Illustrator** - OpenType panel → Alternates  
-- **Figma** - Typography panel → OpenType features
+- **Adobe InDesign** - OpenType panel → Stylistic Sets / Character Variants / Stylistic Alternates
+- **Adobe Illustrator** - OpenType panel → Alternates (uses `salt` feature)
+- **Figma** - Typography panel → OpenType features → Stylistic Sets
 - **Sketch** - Typography inspector → OpenType features
+- **Microsoft Word** - Home tab → Font dialog → Advanced → Stylistic Sets
 - **Font Viewers** - Alternates appear as separate glyphs without Unicode codepoints
+
+#### OpenType Feature Summary
+- **`ss01-ss20`** - Stylistic Sets (for thematic alternate groups, uses single substitution)
+- **`cv01-cv99`** - Character Variants (for individual alternates, supports multiple choices per base glyph)
+- **`salt`** - Stylistic Alternates (general access to all alternates with proper choice UI)
+- **`aalt`** - Access All Alternates (aggregate feature for maximum compatibility)
+
+**Proper OpenType Implementation:**
+- **Single alternates**: `sub uni0061 by uni0061.ss01;`
+- **Multiple alternates**: `sub uni0021 from [uni0021.cv01 uni0021.cv02];` 
+- **Choice UI**: Design apps show dropdown/cycle interface for multiple alternates
 
 ### Kerning Configuration
 Define spacing adjustments between specific letter pairs. Negative values tighten spacing, positive values loosen it.

@@ -181,52 +181,137 @@ def analyze_all_svgs_for_metrics(config, auto_sidebearing=False):
     
     return calculated_metrics
 
-def generate_opentype_features(config, font_glyphs):
-    """Generate OpenType feature code for alternates that actually exist in the font."""
+def generate_opentype_features(config, font_glyphs, detected_alternates):
+    """Generate OpenType feature code based on detected alternate glyphs from SVG filenames."""
     features = []
-    alternates_config = config.get("alternates", {})
     
-    # Generate Stylistic Sets (ss01, ss02, etc.)
-    stylistic_sets = alternates_config.get("stylisticSets", {})
-    for set_tag, set_info in stylistic_sets.items():
-        # Only include substitutions where both base and alternate glyphs exist
-        valid_substitutions = []
-        for base_glyph, alt_glyph in set_info.get("substitutions", {}).items():
-            if base_glyph in font_glyphs and alt_glyph in font_glyphs:
-                valid_substitutions.append((base_glyph, alt_glyph))
+    # Group ALL alternates by base glyph for salt feature
+    all_alternates_by_base = {}  # base_glyph: [alt1, alt2, alt3, ...]
+    
+    # Group alternates by feature type and number
+    stylistic_sets = {}  # ss01: {base_glyph: [alts]}
+    character_variants = {}  # cv01: {base_glyph: [alts]}
+    
+    # Process detected alternates and group them
+    for alt_name, alt_info in detected_alternates.items():
+        if alt_name not in font_glyphs:
+            continue  # Skip if alternate glyph wasn't created
+            
+        # Determine the base glyph name
+        if alt_info['base'].startswith("U+"):
+            base_cp = codepoint_from_name(alt_info['base'])
+            if base_cp == 0x0020:
+                base_glyph = "space"
+            else:
+                base_glyph = production_name_from_cp(base_cp)
+        else:
+            base_glyph = alt_info['base']
+            
+        if base_glyph not in font_glyphs:
+            continue  # Skip if base glyph doesn't exist
         
-        if valid_substitutions:  # Only create feature if we have valid substitutions
+        # Add to all alternates collection for salt
+        if base_glyph not in all_alternates_by_base:
+            all_alternates_by_base[base_glyph] = []
+        all_alternates_by_base[base_glyph].append(alt_name)
+            
+        # Group by feature type
+        if alt_info['type'] == 'stylistic_set':
+            feature_tag = f"ss{alt_info['number'].zfill(2)}"
+            if feature_tag not in stylistic_sets:
+                stylistic_sets[feature_tag] = {}
+            if base_glyph not in stylistic_sets[feature_tag]:
+                stylistic_sets[feature_tag][base_glyph] = []
+            stylistic_sets[feature_tag][base_glyph].append(alt_name)
+            
+        elif alt_info['type'] == 'character_variant':
+            feature_tag = f"cv{alt_info['number'].zfill(2)}"
+            if feature_tag not in character_variants:
+                character_variants[feature_tag] = {}
+            if base_glyph not in character_variants[feature_tag]:
+                character_variants[feature_tag][base_glyph] = []
+            character_variants[feature_tag][base_glyph].append(alt_name)
+    
+    # Generate Stylistic Sets features (use single substitution for consistent styling)
+    for set_tag, base_to_alts in sorted(stylistic_sets.items()):
+        if base_to_alts:
             feature_code = f"""
 feature {set_tag} {{
-    # {set_info.get('name', set_tag)}
-    # {set_info.get('description', '')}
+    # Stylistic Set {set_tag[-2:]} - Auto-generated from SVG filenames
 """
-            for base_glyph, alt_glyph in valid_substitutions:
-                feature_code += f"    sub {base_glyph} by {alt_glyph};\n"
+            for base_glyph, alt_glyphs in base_to_alts.items():
+                # Use first alternate for consistent styling across the set
+                feature_code += f"    sub {base_glyph} by {alt_glyphs[0]};\n"
             
             feature_code += "} " + set_tag + ";\n"
             features.append(feature_code)
     
-    # Generate Character Variants (cv01, cv02, etc.)
-    char_variants = alternates_config.get("characterVariants", {})
-    for cv_tag, cv_info in char_variants.items():
-        # Only include substitutions where both base and alternate glyphs exist
-        valid_substitutions = []
-        for base_glyph, alt_glyph in cv_info.get("substitutions", {}).items():
-            if base_glyph in font_glyphs and alt_glyph in font_glyphs:
-                valid_substitutions.append((base_glyph, alt_glyph))
-        
-        if valid_substitutions:  # Only create feature if we have valid substitutions
+    # Generate Character Variants features (use alternate substitution for choice)
+    for cv_tag, base_to_alts in sorted(character_variants.items()):
+        if base_to_alts:
             feature_code = f"""
 feature {cv_tag} {{
-    # {cv_info.get('name', cv_tag)}
-    # {cv_info.get('description', '')}
+    # Character Variant {cv_tag[-2:]} - Auto-generated from SVG filenames
 """
-            for base_glyph, alt_glyph in valid_substitutions:
-                feature_code += f"    sub {base_glyph} by {alt_glyph};\n"
+            for base_glyph, alt_glyphs in base_to_alts.items():
+                if len(alt_glyphs) == 1:
+                    # Single alternate: use simple substitution
+                    feature_code += f"    sub {base_glyph} by {alt_glyphs[0]};\n"
+                else:
+                    # Multiple alternates: use alternate substitution
+                    alts_list = " ".join(alt_glyphs)
+                    feature_code += f"    sub {base_glyph} from [{alts_list}];\n"
             
             feature_code += "} " + cv_tag + ";\n"
             features.append(feature_code)
+    
+    # Generate salt (Stylistic Alternates) - general access to all alternates
+    all_substitutions = []
+    
+    # Generate salt (Stylistic Alternates) - show ALL alternates for each base
+    if all_alternates_by_base:
+        salt_feature = """
+feature salt {
+    # Stylistic Alternates - General access to all alternates
+"""
+        for base_glyph, alt_glyphs in all_alternates_by_base.items():
+            if len(alt_glyphs) == 1:
+                # Single alternate: use simple substitution
+                salt_feature += f"    sub {base_glyph} by {alt_glyphs[0]};\n"
+            else:
+                # Multiple alternates: use alternate substitution (proper OpenType)
+                alts_list = " ".join(alt_glyphs)
+                salt_feature += f"    sub {base_glyph} from [{alts_list}];\n"
+        
+        salt_feature += "} salt;\n"
+        features.append(salt_feature)
+    
+    # Generate aalt (Access All Alternates) - include all features
+    if features:
+        aalt_feature = """
+feature aalt {
+    # Access All Alternates - Aggregate feature for broad compatibility
+"""
+        # Include all generated features
+        for feature_code in features:
+            # Extract feature name from the feature code
+            if "feature salt" in feature_code:
+                aalt_feature += "    feature salt;\n"
+            elif "feature ss" in feature_code:
+                # Extract ss## from the feature code
+                import re
+                match = re.search(r'feature (ss\d+)', feature_code)
+                if match:
+                    aalt_feature += f"    feature {match.group(1)};\n"
+            elif "feature cv" in feature_code:
+                # Extract cv## from the feature code  
+                import re
+                match = re.search(r'feature (cv\d+)', feature_code)
+                if match:
+                    aalt_feature += f"    feature {match.group(1)};\n"
+        
+        aalt_feature += "} aalt;\n"
+        features.append(aalt_feature)
     
     return "\n".join(features)
 
@@ -592,10 +677,11 @@ def build_ufo(family_name, style_name, auto_sidebearing=False):
 
     # Generate OpenType features for alternates (only for glyphs that exist)
     font_glyph_names = set(u.keys())
-    feature_code = generate_opentype_features(config, font_glyph_names)
+    feature_code = generate_opentype_features(config, font_glyph_names, alternates)
     if feature_code.strip():
         u.features.text = feature_code
         print("Generated OpenType features for alternates")
+        print(f"Features generated: {len([f for f in feature_code.split('feature ') if f.strip()])}")
     else:
         print("No valid alternate glyphs found for OpenType features")
 
